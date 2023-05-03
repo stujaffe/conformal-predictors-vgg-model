@@ -9,19 +9,22 @@ from datetime import datetime
 from train_modified import custom_load, flatten
 
 IMAGE_DIR = "./images/"
-MODEL_PATH = "./results_20epoch/model_path_20_low_expert_select.pth"
-TEST_RESULTS_PATH = "./results_20epoch/results_20_low_expert_select.csv"
+MODEL_PATH = "./results_20epoch/model_path_20_low_random_holdout.pth"
+TEST_RESULTS_PATH = "./results_20epoch/results_20_low_random_holdout.csv"
 MODEL_RUN_OUTPUT_DIR = "./results_alllogits_20epoch/"
 
 NUM_CLASSES = 114
 BATCH_SIZE = 64
 NUM_WORKERS = 12
 LABEL = "low"
-HOLDOUT_SET = "expert_select"
+HOLDOUT_SET = "random_holdout"
 DATALOADER_NAME = "val"
 
 if __name__ == "__main__":
     start_time = datetime.utcfromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
+
+    print(f"Loading the following model: {MODEL_PATH}")
+    print(f"Using the following data as the implied test set: {TEST_RESULTS_PATH}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device} for PyTorch operations.")

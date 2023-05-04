@@ -14,7 +14,7 @@ from torch.optim import lr_scheduler
 import time
 import copy
 import sys
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import time
 from datetime import datetime
@@ -30,8 +30,19 @@ IMAGE_DIR = "./images/"
 OUTPUT_DIR = "./output/"
 
 BATCH_SIZE = 64
-
 NUM_WORKERS = 12
+NUM_CLASSES = 114
+
+HOLDOUT_SET_LIST = [
+        #"expert_select",
+        #"random_holdout",
+        #"a12",
+        #"a34",
+        #"a56",
+        #"dermaamin",
+        #"br",
+        "random_holdout50",
+    ]
 
 
 def flatten(list_of_lists):
@@ -261,15 +272,7 @@ if __name__ == "__main__":
     df["high"] = df["three_partition_label"].astype("category").cat.codes
     df["hasher"] = df["md5hash"]
 
-    for holdout_set in [
-        "expert_select",
-        "random_holdout",
-        "a12",
-        "a34",
-        "a56",
-        "dermaamin",
-        "br",
-    ]:
+    for holdout_set in HOLDOUT_SET_LIST:
         if holdout_set == "expert_select":
             df2 = df
             train = df2[df2.qc.isnull()]
@@ -277,6 +280,10 @@ if __name__ == "__main__":
         elif holdout_set == "random_holdout":
             train, test, y_train, y_test = train_test_split(
                 df, df.low, test_size=0.2, random_state=4242, stratify=df.low
+            )
+        elif holdout_set == "random_holdout50":
+            train, test, y_train, y_test = train_test_split(
+                df, df.low, test_size=0.5, random_state=4242, stratify=df.low
             )
         elif holdout_set == "dermaamin":
             combo = set(
@@ -402,6 +409,8 @@ if __name__ == "__main__":
             p1 = []
             p2 = []
             p3 = []
+            # List to hold the logits for all classes
+            logits_list = []
             with torch.no_grad():
                 running_corrects = 0
                 for i, batch in enumerate(dataloaders["val"]):
@@ -422,6 +431,7 @@ if __name__ == "__main__":
                     labels_list.append(classes.tolist())
                     fitzpatrick_scale_list.append(fitzpatrick_scale.tolist())
                     hasher_list.append(hasher)
+                    logits_list.append(outputs.tolist())
                 acc = float(running_corrects) / float(dataset_sizes["val"])
             if label == "low":
                 for j in topk_n:
@@ -449,13 +459,29 @@ if __name__ == "__main__":
                         "p3": p3,
                     }
                 )
+                # Append the logits for all classes
+                
+                # For each batch, outputs.tolist() results in a list of lists where the outer list is of length "batch size" (e.g. 64) and each inner list
+                # is of length "number of classes" (e.g. 114 in this case). Then logits_list, is another outer list with length of the "number of batches".
+                # So we want to "stack" the middle layer so that we have a list of lists with outer list of length "number of images" and each inner length
+                # the "number of classes".
+                logits_list_flat = [item for sublist in logits_list for item in sublist]
+
+                df_logits = pd.DataFrame(logits_list_flat)
+                # Rename columns
+                df_logits_colnames = {i:f"logit_class_{i}" for i in range(NUM_CLASSES)}
+                df_logits.rename(columns=df_logits_colnames, inplace=True)
+
+                # Concat to the existing dataframe
+                df_output = pd.concat([df_x,df_logits], axis=1)
+
             else:
                 print(len(flatten(hasher_list)))
                 print(len(flatten(labels_list)))
                 print(len(flatten(fitzpatrick_scale_list)))
                 print(len(flatten(p_list)))
                 print(len(flatten(prediction_list)))
-                df_x = pd.DataFrame(
+                df_output = pd.DataFrame(
                     {
                         "hasher": flatten(hasher_list),
                         "label": flatten(labels_list),
@@ -464,7 +490,7 @@ if __name__ == "__main__":
                         "prediction": flatten(prediction_list),
                     }
                 )
-            df_x.to_csv(
+            df_output.to_csv(
                 "{}results_{}_{}_{}.csv".format(
                     OUTPUT_DIR, n_epochs, label, holdout_set
                 ),

@@ -1,9 +1,6 @@
 """
-train.py but with the following changes:
-# Add a holdout group with 50% train/test (the existing one had 80% train/20% test)
-# Add logit predictions for all 114 classes instead of just top 3
-# Add ENV variables at the beginning of the script
-# Include os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512" so the GPU wouldn't run out of memory when training (AWS EC2 instance: g4dn.4xlarge)
+train_modified.py but with the following changes:
+# Add variational inference through the pyro library and the required changes to certain PyTorch API calls
 """
 
 from __future__ import print_function, division
@@ -16,9 +13,7 @@ import skimage
 from skimage import io
 import warnings
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data.sampler import WeightedRandomSampler
-from torch.optim import lr_scheduler
 import time
 import copy
 import sys
@@ -26,10 +21,17 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import time
 from datetime import datetime
-
 import os
+import sys
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+import pyro
+import pyro.distributions as dist
+from pyro.nn import PyroModule
+from pyro.infer import SVI, Trace_ELBO
+from pyro.infer.autoguide import AutoDiagonalNormal
+
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 warnings.filterwarnings("ignore")
 
@@ -37,8 +39,8 @@ IMAGE_DIR = "./images/"
 
 OUTPUT_DIR = "./output/"
 
-BATCH_SIZE = 64
-NUM_WORKERS = 12
+BATCH_SIZE = 4
+NUM_WORKERS = 10
 NUM_CLASSES = 114
 
 HOLDOUT_SET_LIST = [
@@ -52,6 +54,65 @@ HOLDOUT_SET_LIST = [
         "random_holdout50",
     ]
 
+"""
+class VariationalLinear(PyroModule):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = PyroSample(
+            lambda self: dist.Normal(0., 1.).expand([self.out_features, self.in_features]).to_event(2)
+        )
+        self.bias = PyroSample(
+            lambda self: dist.Normal(0., 1.).expand([self.out_features]).to_event(1)
+        )
+
+    def forward(self, x):
+        return torch.nn.functional.linear(x, self.weight, self.bias)
+"""
+
+class VariationalLinear(PyroModule):
+    def __init__(self, in_features, out_features, layer_id):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.layer_id = layer_id
+
+        # register learnable params in Pyro's parameter store
+        self.weight_mu = nn.Parameter(torch.randn(out_features, in_features))
+        self.weight_log_var = nn.Parameter(torch.randn(out_features, in_features))
+        self.bias_mu = nn.Parameter(torch.randn(out_features))
+        self.bias_log_var = nn.Parameter(torch.randn(out_features))
+
+    def forward(self, x):
+        weight_std = torch.exp(0.5 * self.weight_log_var)
+        bias_std = torch.exp(0.5 * self.bias_log_var)
+
+        # sample weights and biases from normal distribution
+        weight_pyro = pyro.sample(
+                f"weight_pyro_{self.layer_id}", dist.Normal(self.weight_mu, weight_std).to_event(2)
+            )
+        if weight_pyro.dim() > 2:
+            weight_pyro = torch.mean(weight_pyro, dim=0)
+        bias_pyro = pyro.sample(f"bias_pyro_{self.layer_id}", dist.Normal(self.bias_mu, bias_std).to_event(1))
+
+        if bias_pyro.dim() > 1:
+            bias_pyro = torch.mean(bias_pyro, dim=0)
+
+        return torch.nn.functional.linear(x, weight_pyro, bias_pyro)
+
+
+def pyro_model(model, inputs, labels):
+    pyro.module("model", model)
+    with pyro.plate("data", len(inputs)):
+        outputs = model(inputs)
+        pyro.sample("obs", dist.Categorical(logits=outputs), obs=labels)
+
+def adjust_learning_rate(pyro_optimizer, epoch, initial_lr, step_size, gamma=0.1):
+    """Sets the learning rate to the initial LR decayed by 10 every specified number of epochs"""
+    lr = initial_lr * (gamma ** (epoch // step_size))
+    for name, _ in pyro.get_param_store().named_parameters():
+        pyro_optimizer.set_learning_rate(lr, name)
 
 def flatten(list_of_lists):
     if len(list_of_lists) == 0:
@@ -60,16 +121,14 @@ def flatten(list_of_lists):
         return flatten(list_of_lists[0]) + flatten(list_of_lists[1:])
     return list_of_lists[:1] + flatten(list_of_lists[1:])
 
-
 def train_model(
     label,
     dataloaders,
     device,
     dataset_sizes,
     model,
-    criterion,
-    optimizer,
-    scheduler,
+    svi,
+    initial_lr,
     num_epochs=2,
 ):
     since = time.time()
@@ -84,7 +143,7 @@ def train_model(
         for phase in ["train", "val"]:
             if phase == "train":
                 model.train()  # Set model to training mode
-                scheduler.step()
+                adjust_learning_rate(pyro_optimizer, epoch, initial_lr, 2)
             else:
                 model.eval()  # Set model to evaluate mode
 
@@ -100,20 +159,23 @@ def train_model(
                 labels = batch[label]
                 labels = torch.from_numpy(np.asarray(labels)).to(device)
                 # zero the parameter gradients
-                optimizer.zero_grad()
+                pyro.clear_param_store()
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == "train"):
                     inputs = inputs.float()  # ADDED AS A FIX
+                    # Use SVI for loss computation and optimization
+                    loss = svi.step(model, inputs, labels)
+                    if phase == "train":
+                        # No need to perform backward and step, as svi.step already handles optimization
+                        pass
+                    else:
+                        # In validation phase, use svi.evaluate_loss instead of svi.step
+                        loss = svi.evaluate_loss(model, inputs, labels)
                     outputs = model(inputs)
                     _, preds = torch.max(outputs, 1)
-                    loss = criterion(outputs, labels)
-                    # backward + optimize only if in training phase
-                    if phase == "train":
-                        loss.backward()
-                        optimizer.step()
                     # statistics
-                running_loss += loss.item() * inputs.size(0)
+                running_loss += loss * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data)
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects / dataset_sizes[phase]
@@ -136,7 +198,7 @@ def train_model(
         )
     )
     print("Best val Acc: {:4f}".format(best_acc))
-    model.load_state_dict(best_model_wts)
+    pyro.get_param_store().load_state_dict(best_model_wts)
     training_results = pd.DataFrame(training_results)
     training_results.columns = ["phase", "epoch", "loss", "accuracy"]
     return model, training_results
@@ -272,6 +334,8 @@ if __name__ == "__main__":
         df = pd.read_csv("fitzpatrick17k.csv")
     # Clean dataframe so that only downloaded images are included
     df = df[df["md5hash"].isin(df_imgname["md5hash_downloads"])]
+    # Take sample of dataframe
+    df, _ = train_test_split(df, test_size=0.5, random_state=42, stratify=df["fitzpatrick_scale"])
     print(f"Fitzpatrick dataframe shape after filtering: {df.shape}")
     print(df["fitzpatrick_scale"].value_counts())
     print("Rows: {}".format(df.shape[0]))
@@ -281,63 +345,10 @@ if __name__ == "__main__":
     df["hasher"] = df["md5hash"]
 
     for holdout_set in HOLDOUT_SET_LIST:
-        if holdout_set == "expert_select":
-            df2 = df
-            train = df2[df2.qc.isnull()]
-            test = df2[df2.qc == "1 Diagnostic"]
-        elif holdout_set == "random_holdout":
-            train, test, y_train, y_test = train_test_split(
-                df, df.low, test_size=0.2, random_state=4242, stratify=df.low
-            )
-        elif holdout_set == "random_holdout50":
+        if holdout_set == "random_holdout50":
             train, test, y_train, y_test = train_test_split(
                 df, df.low, test_size=0.5, random_state=4242, stratify=df.low
             )
-        elif holdout_set == "dermaamin":
-            combo = set(
-                df[df.url.str.contains("dermaamin") == True].label.unique()
-            ) & set(df[df.url.str.contains("dermaamin") == False].label.unique())
-            df = df[df.label.isin(combo)]
-            df["low"] = df["label"].astype("category").cat.codes
-            train = df[df.url.str.contains("dermaamin") == False]
-            test = df[df.url.str.contains("dermaamin")]
-        elif holdout_set == "br":
-            combo = set(
-                df[df.url.str.contains("dermaamin") == True].label.unique()
-            ) & set(df[df.url.str.contains("dermaamin") == False].label.unique())
-            df = df[df.label.isin(combo)]
-            df["low"] = df["label"].astype("category").cat.codes
-            train = df[df.url.str.contains("dermaamin")]
-            test = df[df.url.str.contains("dermaamin") == False]
-            print(train.label.nunique())
-            print(test.label.nunique())
-        elif holdout_set == "a12":
-            train = df[(df.fitzpatrick_scale == 1) | (df.fitzpatrick_scale == 2)]
-            test = df[(df.fitzpatrick_scale != 1) & (df.fitzpatrick_scale != 2)]
-            combo = set(train.label.unique()) & set(test.label.unique())
-            print(combo)
-            train = train[train.label.isin(combo)].reset_index()
-            test = test[test.label.isin(combo)].reset_index()
-            train["low"] = train["label"].astype("category").cat.codes
-            test["low"] = test["label"].astype("category").cat.codes
-        elif holdout_set == "a34":
-            train = df[(df.fitzpatrick_scale == 3) | (df.fitzpatrick_scale == 4)]
-            test = df[(df.fitzpatrick_scale != 3) & (df.fitzpatrick_scale != 4)]
-            combo = set(train.label.unique()) & set(test.label.unique())
-            train = train[train.label.isin(combo)].reset_index()
-            test = test[test.label.isin(combo)].reset_index()
-            train["low"] = train["label"].astype("category").cat.codes
-            test["low"] = test["label"].astype("category").cat.codes
-        elif holdout_set == "a56":
-            train = df[(df.fitzpatrick_scale == 5) | (df.fitzpatrick_scale == 6)]
-            test = df[(df.fitzpatrick_scale != 5) & (df.fitzpatrick_scale != 6)]
-            combo = set(train.label.unique()) & set(test.label.unique())
-            train = train[train.label.isin(combo)].reset_index()
-            test = test[test.label.isin(combo)].reset_index()
-            train["low"] = train["label"].astype("category").cat.codes
-            test["low"] = test["label"].astype("category").cat.codes
-        print(test.shape)
-        print(test.shape)
         train_path = f"{OUTPUT_DIR}temp_train.csv"
         test_path = f"{OUTPUT_DIR}temp_test.csv"
         train.to_csv(train_path, index=False)
@@ -354,28 +365,43 @@ if __name__ == "__main__":
                 256, 20, "{}".format(train_path), "{}".format(test_path), label=label
             )
             print(dataset_sizes)
+            """
             model_ft = models.vgg16(pretrained=True)
             for param in model_ft.parameters():
                 param.requires_grad = False
             model_ft.classifier[6] = nn.Sequential(
-                nn.Linear(4096, 256),
+                VariationalLinear(4096, 256, 0),
                 nn.ReLU(),
                 nn.Dropout(0.4),
-                nn.Linear(256, len(label_codes)),
+                VariationalLinear(256, len(label_codes), 1),
+                nn.LogSoftmax(dim=1),
+            )
+            """
+            model_ft = models.resnet18(pretrained=True)
+            num_ftrs = model_ft.fc.in_features
+            print(f"Number of model features: {num_ftrs}")
+            num_classes = len(label_codes)
+            model_ft.fc = nn.Sequential(
+                VariationalLinear(num_ftrs, 256, 0),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                VariationalLinear(256, len(label_codes), 1),
                 nn.LogSoftmax(dim=1),
             )
             total_params = sum(p.numel() for p in model_ft.parameters())
             print("{} total parameters".format(total_params))
-            total_trainable_params = sum(
-                p.numel() for p in model_ft.parameters() if p.requires_grad
-            )
+            # Count the trainable parameters
+            total_trainable_params = sum(p.numel() for p in model_ft.fc.parameters() if p.requires_grad)
             print("{} total trainable parameters".format(total_trainable_params))
             model_ft = model_ft.to(device)
-            model_ft = nn.DataParallel(model_ft)
+            #model_ft = nn.DataParallel(model_ft)
             class_weights = torch.FloatTensor(weights).to(device)
             criterion = nn.NLLLoss()
-            optimizer_ft = optim.Adam(model_ft.parameters())
-            exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+            initial_lr = 0.001
+            pyro_optimizer = pyro.optim.Adam({"lr": initial_lr})
+            guide = AutoDiagonalNormal(pyro_model, init_scale=0.01)
+            svi = SVI(pyro_model, guide, pyro_optimizer, loss=Trace_ELBO())
+            pyro.clear_param_store()
             print("\nTraining classifier for {}........ \n".format(label))
             print("....... processing ........ \n")
             model_ft, training_results = train_model(
@@ -384,14 +410,12 @@ if __name__ == "__main__":
                 device,
                 dataset_sizes,
                 model_ft,
-                criterion,
-                optimizer_ft,
-                exp_lr_scheduler,
+                svi,
+                initial_lr,
                 n_epochs,
             )
             print("Training Complete")
-            torch.save(
-                model_ft.state_dict(),
+            pyro.get_param_store().save(
                 "{}model_path_{}_{}_{}.pth".format(
                     OUTPUT_DIR, n_epochs, label, holdout_set
                 ),
@@ -403,6 +427,11 @@ if __name__ == "__main__":
                 )
             )
             model = model_ft.eval()
+            pyro.get_param_store().load(
+                "{}model_path_{}_{}_{}.pth".format(
+                    OUTPUT_DIR, n_epochs, label, holdout_set
+                ),
+            )
             loader = dataloaders["val"]
             prediction_list = []
             fitzpatrick_scale_list = []

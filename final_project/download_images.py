@@ -66,8 +66,6 @@ if __name__ == "__main__":
 
     df_clean = df[~mask]
 
-    # print(df_clean[df_clean["md5hash"]=="dc00687b3d681399aafef060c45826c2"])
-
     image_dict_list = [
         {"hash": hash_val, "url": url_val}
         for hash_val, url_val in zip(

@@ -42,13 +42,13 @@ NUM_WORKERS = 12
 NUM_CLASSES = 114
 
 HOLDOUT_SET_LIST = [
-        #"expert_select",
-        #"random_holdout",
-        #"a12",
-        #"a34",
-        #"a56",
-        #"dermaamin",
-        #"br",
+        "expert_select",
+        "random_holdout",
+        "a12",
+        "a34",
+        "a56",
+        "dermaamin",
+        "br",
         "random_holdout50",
     ]
 

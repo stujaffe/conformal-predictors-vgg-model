@@ -14,4 +14,5 @@
     d. The model will run for 20 epochs over 8 different variations of train/test splits, 7 from the original authors and 1 added by us. You can modify which variations are run with the global variable `HOLDOUT_SET_LIST` at the beginning of the script. <br />
     e. All model outputs will be, as you might suspect, in the directory `output`. <br />
 6. To run `train_mcdropout.py` is the same process as `train_modified.py`. We specifically only ran `train_mcdropout.py` for the `random_holdout50` train/test split due to the extra computational overhead of the Monte Carlo dropout. You can adjust the train/test split groups in `HOLDOUT_SET_LIST`. To increase the number of MC dropout iterations, adjust the global variable `NUM_MC_SAMPLES`.
-7. We were not able to run `train_varinf.py` due to lack of GPU memory on the EC2 instance (16GB). Reducing batch size, split size, etc did not help. The VGG model is quite large to begin with, plus the image data, so memory was consumed quickly.
+7. To run `train_resnet.py` is the same process as `train_modified.py`.
+8. We were not able to run `train_varinf.py` due to lack of GPU memory on the EC2 instance (16GB). Reducing batch size, split size, etc did not help. The VGG model is quite large to begin with, plus the image data, so memory was consumed quickly.

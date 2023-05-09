@@ -16,3 +16,11 @@
 6. To run `train_mcdropout.py` is the same process as `train_modified.py`. We specifically only ran `train_mcdropout.py` for the `random_holdout50` train/test split due to the extra computational overhead of the Monte Carlo dropout. You can adjust the train/test split groups in `HOLDOUT_SET_LIST`. To increase the number of MC dropout iterations, adjust the global variable `NUM_MC_SAMPLES`.
 7. To run `train_resnet.py` is the same process as `train_modified.py`.
 8. We were not able to run `train_varinf.py` due to lack of GPU memory on the EC2 instance (16GB). Reducing batch size, split size, etc did not help. The VGG model is quite large to begin with, plus the image data, so memory was consumed quickly.
+9. To run `run_model.py`:
+    a. This script will output all of the log probabilities given a PyTorch model and the test results from a model having only the top 3 log probability outputs. <br />
+    b. Specify the directories and file paths: <br />
+        1. `IMAGE_DIR`: The directory of images specified earlier. <br />
+        2. `MODEL_PATH`: The path of the PyTorch model file produced in training. <br />
+        3. `TEST_RESULTS_PATH`: The path of the output of the test set results from training. <br />
+        4. `HOLDOUT_SET`: The particular train/test split on which you trained the model (for labeling files only). <br />
+        5. `DATALOADER_NAME`: "val" or "train" depending if you want all the log probabilities for the training or validation (test) set. <br />

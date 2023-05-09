@@ -10,7 +10,7 @@
 5. To run `train_modified.py`:
     a. Command is: `python3 train_modified.py [num_epochs] [full|dev]`. E.g. `python3 train_modified.py 20 full` <br />
     b. `full` means the full `fitzpatrick17k.csv` dataset and `dev` means run only 1000 samples from the dataset. Note that with `dev` mode you may run into issues when splitting the dataset using group stratification due to class imbalances. <br />
-    c. Run `train_modified.py` on a CUDA enabled machine or else it will take forever, until the end of time basically. An AWS EC2 g4dn.4xlarge was used and it took around 20-25 minutes per epoch. <br />
+    c. Run `train_modified.py` on a CUDA enabled machine or else it will take forever, until the end of time basically. An AWS EC2 g4dn.4xlarge was used and it took around 60 to 90 seconds per epoch. <br />
     d. The model will run for 20 epochs over 8 different variations of train/test splits, 7 from the original authors and 1 added by us. You can modify which variations are run with the global variable `HOLDOUT_SET_LIST` at the beginning of the script. <br />
     e. All model outputs will be, as you might suspect, in the directory `output`. <br />
 6. To run `train_mcdropout.py` is the same process as `train_modified.py`. We specifically only ran `train_mcdropout.py` for the `random_holdout50` train/test split due to the extra computational overhead of the Monte Carlo dropout. You can adjust the train/test split groups in `HOLDOUT_SET_LIST`. To increase the number of MC dropout iterations, adjust the global variable `NUM_MC_SAMPLES`.
